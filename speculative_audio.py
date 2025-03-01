@@ -1,6 +1,7 @@
 import copy
 import torch
 import torchaudio
+import torch.nn as nn
 from transformers import AutoProcessor, MusicgenForConditionalGeneration
 from typing import Optional, Tuple, List
 import time
@@ -12,6 +13,67 @@ from transformers.generation import (
     LogitsProcessorList,
     StoppingCriteriaList,
 )
+
+THRESHOLD = 0.7
+
+
+def jensen_shannon_similarity(p, q, base=2, epsilon=1e-12):
+    """
+    Compute the Jensen-Shannon similarity between two 1D tensors representing 
+    discrete distributions, with safeguards to avoid overflow and NaN values.
+    
+    The function first converts raw scores (logits) to a probability distribution 
+    using a stable softmax (subtracting the maximum value). It then computes the 
+    Jensen-Shannon divergence and converts it to a similarity score (1 = identical).
+    
+    Args:
+      p (torch.Tensor): First tensor of raw scores (1D).
+      q (torch.Tensor): Second tensor of raw scores (1D).
+      base (float): Logarithm base for the KL divergence (default: 2).
+      epsilon (float): A small constant to avoid division by zero and log(0).
+      
+    Returns:
+      torch.Tensor: A scalar tensor with the Jensen-Shannon similarity.
+    """
+    # Flatten the tensors to 1D
+    p = p.reshape(-1)
+    q = q.reshape(-1)
+    
+    # Stable softmax: subtract the max value to avoid overflow
+    p_logsumexp = torch.logsumexp(p, dim=0)
+    q_logsumexp = torch.logsumexp(q, dim=0)
+    p_prob = torch.exp(p - p_logsumexp)
+    q_prob = torch.exp(q - q_logsumexp)
+    
+    # Ensure numerical stability by clamping probabilities to epsilon
+    p_prob = p_prob.clamp(min=epsilon)
+    q_prob = q_prob.clamp(min=epsilon)
+    
+    # Renormalize to ensure they sum to 1 (they should already, but just in case)
+    p_prob = p_prob / (torch.sum(p_prob) + epsilon)
+    q_prob = q_prob / (torch.sum(q_prob) + epsilon)
+    
+    # Compute the average distribution
+    m = 0.5 * (p_prob + q_prob)
+    
+    # Define a helper function for KL divergence using torch.where to avoid log(0)
+    def kl_divergence(a, b):
+        return torch.sum(a * (torch.log(a + epsilon) - torch.log(b + epsilon)))
+    
+    # Change-of-base for logarithm:
+    log_base = torch.log(torch.tensor(base, dtype=torch.float64, device=p.device))
+    kl_pm = kl_divergence(p_prob, m) / log_base
+    kl_qm = kl_divergence(q_prob, m) / log_base
+    
+    # Jensen-Shannon divergence is the average of these KL divergences
+    js_divergence = 0.5 * (kl_pm + kl_qm)
+    
+    # Jensen-Shannon distance is the square root of the divergence
+    js_distance = torch.sqrt(js_divergence)
+    
+    # Define similarity as 1 minus the JS distance
+    similarity = 1 - js_distance
+    return similarity
 
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -27,7 +89,9 @@ def load_models():
     ).eval()  # Add eval() mode for inference
     
     # Load the target (large) model
-    target_model = draft_model
+    target_model = MusicgenForConditionalGeneration.from_pretrained(
+        "facebook/musicgen-large",
+    ).eval()  # Add eval() mode for inference
     # Load the processor (can use the same for both models)
     processor = AutoProcessor.from_pretrained("facebook/musicgen-small")
     
@@ -38,12 +102,13 @@ def generate_speculative(
     draft_model: MusicgenForConditionalGeneration = None,
     target_model: MusicgenForConditionalGeneration = None,
     processor: AutoProcessor = None,
-    max_length: int = 32,
-    look_ahead: int = 1,
+    max_length: int = 91,
+    look_ahead: int = 3,
     **kwargs
 ) -> torch.Tensor:
     
     generation_config = draft_model.generation_config
+    generation_config.max_length = max_length
 
     generation_config = copy.deepcopy(generation_config)
     model_kwargs = generation_config.update(**kwargs)  # All unused kwargs must be model kwargs
@@ -148,7 +213,6 @@ def generate_speculative(
              
     
     
-    current_tokens = input_ids #.unsqueeze(0).reshape((batch_size, 4, -1))
     pad_token_id = generation_config._pad_token_tensor
     output_attentions = generation_config.output_attentions
     output_hidden_states = generation_config.output_hidden_states
@@ -159,11 +223,11 @@ def generate_speculative(
     do_sample = generation_config.do_sample
     
     # Generate until we reach max_length
-    while current_tokens.shape[1] < max_length:
-        # model_kwargs["attention_mask"] = model_kwargs["attention_mask"].reshape((4, 1, 1, -1))
+    while input_ids.shape[1] < max_length:
+        print(input_ids.shape[1], max_length)
+        speculated_probs = torch.empty(batch_size * draft_model.decoder.num_codebooks, 0)
         for i in range(look_ahead):
             model_kwargs = draft_model._get_initial_cache_position(input_ids, model_kwargs)
-            # prepare model inputs
             model_inputs = draft_model.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             # prepare variable output controls (note: some models won't accept all output controls)
@@ -172,10 +236,6 @@ def generate_speculative(
 
             outputs = draft_model.forward(
                 **model_inputs,
-                # input_ids=input_ids,
-                # decoder_input_ids=current_tokens,
-                # output_hidden_states=True,
-                # **model_kwargs
             )
             
             # synced_gpus: don't waste resources running the code we don't need; kwargs must be updated before skipping
@@ -186,24 +246,49 @@ def generate_speculative(
             )
             
             # * (bsz*codebooks, sequence_length, vocab_size)
-            logits = outputs.logits[:, -1:, :]
-            # logits = torch.softmax(logits, dim=-1)
+            next_token_logits = outputs.logits[:, -1:, :].clone().float()
+            next_token_scores = nn.functional.log_softmax(
+                next_token_logits, dim=-1
+            )
             
-            next_token_scores = logits_processor(input_ids, logits)
-            next_token = torch.argmax(next_token_scores, dim=-1)# [-1:]
-            # next_token = next_token.reshape((batch_size, 4, -1))
+            next_token_scores = logits_processor(input_ids, next_token_scores).squeeze(1)
+            do_sample = True
+            if do_sample:
+                probs = nn.functional.softmax(next_token_scores, dim=-1)
+                speculated_probs = torch.cat([speculated_probs, probs], dim=1)
+                
+                next_token = torch.multinomial(probs, num_samples=1).squeeze(1)
+            else:
+                next_token = torch.argmax(next_token_scores, dim=-1)
             
-            input_ids = torch.cat([input_ids, next_token], dim=1)
+            input_ids = torch.cat([input_ids, next_token[:, None]], dim=1)
+        
+        check_outs = target_model.forward(**model_inputs) # verification
+        for i in range(-look_ahead, 0):  
+            next_token_logits = check_outs.logits[:, i, :].clone().float()
+            next_token_scores = nn.functional.log_softmax(
+                next_token_logits, dim=-1
+            )
+            next_token_scores = logits_processor(input_ids[:, i:], next_token_scores).squeeze(1)
+            next_token_probs = nn.functional.softmax(next_token_scores, dim=-1)
+            
+            if jensen_shannon_similarity(next_token_probs, speculated_probs.reshape(4, 2048, 3)[:, :, i]) < THRESHOLD: # TODO: check is imilar in distribution
+                # if not similar to speculated distribution, reject
+                next_token = torch.multinomial(next_token_probs, num_samples=1).squeeze(1)
+                input_ids = input_ids[:, :i]
+                input_ids = torch.cat([input_ids, next_token[:, None]], dim=1)
+                break
+            
        
         
-    output_ids = current_tokens.reshape((batch_size*4, -1))
+    output_ids = input_ids.reshape((batch_size*4, -1))
     output_ids = draft_model.decoder.apply_delay_pattern_mask(output_ids, decoder_delay_pattern_mask)
     output_ids = output_ids[output_ids != generation_config._pad_token_tensor].reshape(
         batch_size, draft_model.decoder.num_codebooks, -1
     )
-    # audio_scales = model_kwargs.get("audio_scales")
-    # if audio_scales is None:
-    audio_scales = [None] * batch_size
+    audio_scales = model_kwargs.get("audio_scales")
+    if audio_scales is None:
+        audio_scales = [None] * batch_size
 
     # (1, bsz, codblocks, sequence_length)
     output_ids = output_ids.unsqueeze(0)
@@ -220,7 +305,7 @@ if __name__ == "__main__":
     # Example usage
     draft_model, target_model, processor = load_models()
     
-    prompts = ["Generate a happy electronic melody"] * 2
+    prompts = ["Generate a happy electronic melody"]
     inputs = processor(text=prompts, padding=True, return_tensors="pt")
     
     start_time = time.time()
