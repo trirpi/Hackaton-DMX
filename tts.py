@@ -122,10 +122,12 @@ class SpeculativeVideoGenerator:
             # Generate speculative frames for chunks sequentially instead of in parallel
             speculation_start = time.time()
             speculative_chunks = []
-            
+
             for i in range(num_to_speculate):
                 current_chunk_idx = chunk_idx + i
-                draft_frames = self._generate_with_draft_model(prompt, frame_chunks[current_chunk_idx])
+                draft_frames = self._generate_with_draft_model(
+                    prompt, frame_chunks[current_chunk_idx]
+                )
                 speculative_chunks.append(draft_frames)
                 print(f"Draft model generated chunk {current_chunk_idx}")
 
@@ -154,9 +156,7 @@ class SpeculativeVideoGenerator:
                     print(f"Chunk {current_chunk_idx}: Accepted speculative frames")
                     final_frames.extend(verified_frames)
                 else:
-                    print(
-                        f"Generating corrected segment for chunk {current_chunk_idx}"
-                    )
+                    print(f"Generating corrected segment for chunk {current_chunk_idx}")
                     corrected_frames = self._generate_with_main_model(
                         prompt,
                         frame_chunks[current_chunk_idx],
@@ -192,12 +192,12 @@ class SpeculativeVideoGenerator:
         # - Smaller chunks at the beginning (more important for setting the scene)
         # - Larger chunks in the middle (often more predictable)
         # - Medium chunks at the end (important for conclusion)
-        
+
         chunks = []
-        
+
         # Store total frames for reference
         self.num_frames = num_frames
-        
+
         if num_frames <= 4:
             # For very short videos, use fixed small chunks
             chunk_size = 2
@@ -208,27 +208,27 @@ class SpeculativeVideoGenerator:
             # Beginning: smaller chunks
             start_chunk_size = 2
             middle_start = min(4, num_frames // 3)
-            
+
             # Add beginning chunks
             for i in range(0, middle_start, start_chunk_size):
                 end = min(i + start_chunk_size, middle_start)
                 chunks.append((i, end))
-            
+
             # Middle: larger chunks
             middle_end = max(middle_start, num_frames - num_frames // 4)
             middle_chunk_size = 3  # Larger chunks in the middle
-            
+
             for i in range(middle_start, middle_end, middle_chunk_size):
                 end = min(i + middle_chunk_size, middle_end)
                 chunks.append((i, end))
-            
+
             # End: medium chunks
             end_chunk_size = 2
-            
+
             for i in range(middle_end, num_frames, end_chunk_size):
                 end = min(i + end_chunk_size, num_frames)
                 chunks.append((i, end))
-        
+
         print(f"Adaptive chunking: {chunks}")
         return chunks
 
@@ -249,13 +249,15 @@ class SpeculativeVideoGenerator:
                 guidance_scale=1.5,  # Minimal guidance
                 generator=torch.Generator(device=self.device).manual_seed(42),
                 height=32,  # Match main model resolution
-                width=32,   # Match main model resolution
+                width=32,  # Match main model resolution
             ).frames[0]
 
         generation_time = time.time() - start_time
         self.timing_stats["draft_generation"].append(generation_time)
 
-        print(f"Draft model generated {frame_duration:.2f}s video in {generation_time:.2f}s")
+        print(
+            f"Draft model generated {frame_duration:.2f}s video in {generation_time:.2f}s"
+        )
 
         return output
 
@@ -271,18 +273,18 @@ class SpeculativeVideoGenerator:
             output = self.main_model(
                 prompt=prompt,
                 num_videos_per_prompt=1,
-                num_inference_steps=30,  # Increased steps to make main model slower
+                num_inference_steps=50,  # Increased steps to make main model slower
                 num_frames=num_frames,
-                guidance_scale=3.0,  # Increased guidance
+                guidance_scale=6.0,  # Increased guidance
                 generator=torch.Generator(device=self.device).manual_seed(42),
-                height=32,  # Slightly larger resolution
-                width=32,   # Slightly larger resolution
             ).frames[0]
 
         generation_time = time.time() - start_time
         self.timing_stats["main_generation"].append(generation_time)
 
-        print(f"Main model generated {frame_duration:.2f}s video in {generation_time:.2f}s")
+        print(
+            f"Main model generated {frame_duration:.2f}s video in {generation_time:.2f}s"
+        )
 
         return output
 
@@ -291,24 +293,24 @@ class SpeculativeVideoGenerator:
         # Ensure frames are in the right format
         frame1 = frame1.astype(np.float32)
         frame2 = frame2.astype(np.float32)
-        
+
         # Normalize frames if needed
         if frame1.max() > 1.0:
             frame1 = frame1 / 255.0
         if frame2.max() > 1.0:
             frame2 = frame2 / 255.0
-        
+
         # Convert to grayscale for some metrics
         if len(frame1.shape) == 3:
             gray1 = np.mean(frame1, axis=2)
             gray2 = np.mean(frame2, axis=2)
         else:
             gray1, gray2 = frame1, frame2
-        
+
         # 1. Mean Squared Error (inverse, so higher is better)
         mse = np.mean((frame1 - frame2) ** 2)
         mse_score = 1.0 / (1.0 + mse * 100)  # Scale to 0-1 range
-        
+
         # 2. Structural similarity
         try:
             # For small images, use a small window size
@@ -317,12 +319,12 @@ class SpeculativeVideoGenerator:
                 win_size -= 1
             if win_size < 3:
                 win_size = 3
-            
+
             ssim_score = ssim(gray1, gray2, data_range=1.0, win_size=win_size)
         except Exception as e:
             print(f"SSIM error: {e}")
             ssim_score = 0.5  # Fallback
-        
+
         # 3. Histogram comparison
         try:
             if len(frame1.shape) == 3:
@@ -345,20 +347,22 @@ class SpeculativeVideoGenerator:
         except Exception as e:
             print(f"Histogram error: {e}")
             hist_score = 0.5  # Fallback
-        
+
         # Print individual scores for debugging
-        print(f"  Detailed metrics - MSE: {mse_score:.2f}, SSIM: {ssim_score:.2f}, Hist: {hist_score:.2f}")
-        
+        print(
+            f"  Detailed metrics - MSE: {mse_score:.2f}, SSIM: {ssim_score:.2f}, Hist: {hist_score:.2f}"
+        )
+
         # Combine metrics with weights
         combined_score = (0.3 * mse_score) + (0.5 * ssim_score) + (0.2 * hist_score)
-        
+
         return combined_score
-        
+
     def _calculate_temporal_consistency(self, frames):
         """Calculate temporal consistency across a sequence of frames."""
         if len(frames) < 2:
             return 0.8  # Default score for single frame
-        
+
         # Convert frames to numpy arrays and normalize
         np_frames = []
         for frame in frames:
@@ -366,28 +370,30 @@ class SpeculativeVideoGenerator:
             if frame_np.max() > 1.0:
                 frame_np = frame_np / 255.0
             np_frames.append(frame_np)
-        
+
         # Calculate frame-to-frame differences
         diff_scores = []
         for i in range(1, len(np_frames)):
             # Mean absolute difference
-            mad = np.mean(np.abs(np_frames[i] - np_frames[i-1]))
+            mad = np.mean(np.abs(np_frames[i] - np_frames[i - 1]))
             # Convert to a score (lower difference = higher score)
             diff_score = 1.0 - min(1.0, mad * 5)  # Scale to make it more sensitive
             diff_scores.append(diff_score)
-        
+
         # Calculate motion smoothness
         if len(np_frames) >= 3:
             smoothness_scores = []
-            for i in range(1, len(np_frames)-1):
+            for i in range(1, len(np_frames) - 1):
                 # Calculate acceleration (change in motion)
-                diff1 = np_frames[i] - np_frames[i-1]
-                diff2 = np_frames[i+1] - np_frames[i]
+                diff1 = np_frames[i] - np_frames[i - 1]
+                diff2 = np_frames[i + 1] - np_frames[i]
                 accel = np.mean(np.abs(diff2 - diff1))
                 # Convert to a score (lower acceleration = higher score)
-                smoothness = 1.0 - min(1.0, accel * 10)  # Scale to make it more sensitive
+                smoothness = 1.0 - min(
+                    1.0, accel * 10
+                )  # Scale to make it more sensitive
                 smoothness_scores.append(smoothness)
-            
+
             # Combine difference and smoothness
             if smoothness_scores:
                 avg_smoothness = np.mean(smoothness_scores)
@@ -398,18 +404,18 @@ class SpeculativeVideoGenerator:
                 temporal_score = np.mean(diff_scores)
         else:
             temporal_score = np.mean(diff_scores)
-        
+
         print(f"  Temporal consistency: {temporal_score:.2f}")
         return temporal_score
-    
+
     def _get_adaptive_threshold(self, frame_range, content_type=None):
         """Get adaptive threshold based on content type and chunk position."""
         start_idx, end_idx = frame_range
         num_frames = end_idx - start_idx
-        
+
         # Base threshold
         base_threshold = 0.85
-        
+
         # Adjust based on chunk position
         if start_idx == 0:
             # First chunk is more important for setting the scene
@@ -420,7 +426,7 @@ class SpeculativeVideoGenerator:
         else:
             # Middle chunks can be slightly more lenient
             position_factor = 0.0
-            
+
         # Adjust based on content type
         if content_type == "high_motion":
             # More lenient for high motion scenes
@@ -433,52 +439,55 @@ class SpeculativeVideoGenerator:
             content_factor = -0.03
         else:
             content_factor = 0.0
-            
+
         # Calculate final threshold
         threshold = base_threshold + position_factor + content_factor
-        
+
         # Ensure threshold is within reasonable bounds
         return max(0.75, min(0.95, threshold))
-    
+
     def _detect_content_type(self, frames):
         """Detect the type of content in the frames."""
         if len(frames) == 0:
             return None
-            
+
         # Convert frames to numpy arrays
         np_frames = [np.array(frame) for frame in frames]
-        
+
         # Calculate frame-to-frame differences
         if len(np_frames) > 1:
-            diffs = [np.mean(np.abs(np_frames[i+1] - np_frames[i])) for i in range(len(np_frames)-1)]
+            diffs = [
+                np.mean(np.abs(np_frames[i + 1] - np_frames[i]))
+                for i in range(len(np_frames) - 1)
+            ]
             mean_diff = np.mean(diffs)
-            
+
             # Detect high motion
             if mean_diff > 30:  # Threshold for high motion
                 return "high_motion"
-                
+
         # For a real implementation, you would add face detection here
         # For simplicity, we'll use a placeholder based on color distribution
-        
+
         # Check if likely a static scene
         if len(np_frames) > 1:
             if mean_diff < 5:  # Very low motion
                 return "static"
-                
+
         # Default content type
         return "general"
-    
+
     def _verify_chunk(self, prompt, draft_frames, frame_range):
         """Verify a chunk using enhanced metrics and adaptive thresholds."""
         start_time = time.time()
         start_idx, end_idx = frame_range
-        
+
         # 1. Evaluate temporal consistency within the draft chunk
         temporal_score = self._calculate_temporal_consistency(draft_frames)
-        
+
         # 2. Detect content type for adaptive thresholds
         content_type = self._detect_content_type(draft_frames)
-        
+
         # 3. Generate a keyframe with the main model for comparison
         with torch.no_grad():
             keyframe = self.main_model(
@@ -488,36 +497,41 @@ class SpeculativeVideoGenerator:
                 num_frames=1,
                 guidance_scale=2.5,
                 generator=torch.Generator(device=self.device).manual_seed(42),
-                height=32,
-                width=32,
+                # height=32,
+                # width=32,
             ).frames[0][0]
-        
+
         # 4. Compare the last draft frame with the keyframe
         last_draft_frame = draft_frames[-1]
         frame_similarity = self._calculate_frame_similarity(
-            np.array(keyframe), 
-            np.array(last_draft_frame)
+            np.array(keyframe), np.array(last_draft_frame)
         )
-        
+
         # 5. Get adaptive threshold based on content type and position
         threshold = self._get_adaptive_threshold(frame_range, content_type)
-        
+
         # 6. Combine metrics for final decision
         # Weight frame similarity more heavily than temporal consistency
         combined_score = 0.7 * frame_similarity + 0.3 * temporal_score
-        
+
         # For testing purposes, make the threshold more lenient to see some acceptances
         # In a real implementation, you'd use the proper threshold
         test_threshold = 0.6  # More lenient for testing
-        
+
         is_accepted = combined_score > test_threshold
-        
+
         # Log detailed metrics
-        print(f"Chunk {frame_range} ({content_type}): Combined score {combined_score:.2f}")
-        print(f"  Frame similarity: {frame_similarity:.2f}, Temporal: {temporal_score:.2f}")
-        print(f"  Threshold: {test_threshold:.2f} - {'Accepted' if is_accepted else 'Rejected'}")
+        print(
+            f"Chunk {frame_range} ({content_type}): Combined score {combined_score:.2f}"
+        )
+        print(
+            f"  Frame similarity: {frame_similarity:.2f}, Temporal: {temporal_score:.2f}"
+        )
+        print(
+            f"  Threshold: {test_threshold:.2f} - {'Accepted' if is_accepted else 'Rejected'}"
+        )
         print(f"  Verification took {time.time()-start_time:.2f}s")
-        
+
         return is_accepted, draft_frames
 
     def _display_timing_statistics(self, total_time, num_frames):
@@ -635,11 +649,15 @@ def generate_video_example():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Create the generator with more workers for parallelism
-    generator = SpeculativeVideoGenerator(device=device, num_workers=3)  # Increased workers
+    generator = SpeculativeVideoGenerator(
+        device=device, num_workers=3
+    )  # Increased workers
 
     # Prompt to generate
-    prompt = "A little girl is riding a bicycle at high speed. Focused, detailed, realistic."
-    
+    prompt = (
+        "A little girl is riding a bicycle at high speed. Focused, detailed, realistic."
+    )
+
     # Generate video frames with parameters that favor speculative decoding
     frames = generator.generate_video(
         prompt=prompt,
