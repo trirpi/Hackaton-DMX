@@ -1,4 +1,4 @@
-# Hackaton-DMX
+# DMX-Speculative-Decoding
 
 Speculative Decoding Framework
 A generalized framework for accelerating AI generation across multiple modalities (text-to-video, text-to-audio, text-to-speech) using speculative decoding techniques.
@@ -73,12 +73,14 @@ See pyproject.toml for full dependencies
 
 ## Citation
 If you use this framework in your research, please cite our work:
+```
 @software{speculative_decoding_framework,
   author = {Hackaton-DMX Team},
   title = {Dmx Speculative Decoding Framework},
   year = {2025},
   url = {https://github.com/trirpi/Hackaton-DMX}
 }
+```
 
 ### License
 MIT
