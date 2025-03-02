@@ -16,6 +16,10 @@ from transformers.generation import (
 
 THRESHOLD = 0.9915
 
+from torchao.quantization import quantize_, int8_weight_only
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 def jensen_shannon_similarity(p, q, base=2, epsilon=1e-12):
     """
@@ -85,14 +89,17 @@ from transformers.modeling_outputs import (
 )
 
 
-def load_models():
+def load_models(quantize=False):
     draft_model = MusicgenForConditionalGeneration.from_pretrained(
-        "facebook/musicgen-small",
+        "facebook/musicgen-small", device_map=device
     ).eval()  # Add eval() mode for inference
+
+    if quantize:
+        quantize_(draft_model, int8_weight_only())
 
     # Load the target (large) model
     target_model = MusicgenForConditionalGeneration.from_pretrained(
-        "facebook/musicgen-large",
+        "facebook/musicgen-large", device_map=device
     ).eval()  # Add eval() mode for inference
     # Load the processor (can use the same for both models)
     processor = AutoProcessor.from_pretrained("facebook/musicgen-small")
@@ -105,7 +112,7 @@ def generate_speculative(
     draft_model: MusicgenForConditionalGeneration = None,
     target_model: MusicgenForConditionalGeneration = None,
     processor: AutoProcessor = None,
-    max_length: int = 200,
+    max_length: int = 201,
     look_ahead: int = 8,
     **kwargs,
 ) -> torch.Tensor:
@@ -139,22 +146,29 @@ def generate_speculative(
 
     # 3. Define model inputs
     inputs_tensor, model_input_name, model_kwargs = draft_model._prepare_model_inputs(
-        inputs, generation_config.bos_token_id, model_kwargs
+        inputs,
+        generation_config.bos_token_id,
+        model_kwargs,
     )
+    inputs_tensor = inputs_tensor.to(device)
     batch_size = inputs_tensor.shape[0]
     draft_model._prepare_special_tokens(
-        generation_config, kwargs_has_attention_mask, device=inputs_tensor.device
+        generation_config, kwargs_has_attention_mask, device=device
     )
 
     # 4. Define other model kwargs
     model_kwargs["use_cache"] = False  # generation_config.use_cache
     model_kwargs["guidance_scale"] = generation_config.guidance_scale
 
+    model_kwargs = {
+        k: v.to(device) if isinstance(v, torch.Tensor) else v
+        for k, v in model_kwargs.items()
+    }
     if model_kwargs.get("attention_mask", None) is None and requires_attention_mask:
         model_kwargs["attention_mask"] = (
             draft_model._prepare_attention_mask_for_generation(
                 inputs_tensor, generation_config, model_kwargs
-            )
+            ).to(device)
         )
 
     if "encoder_outputs" not in model_kwargs:
@@ -168,6 +182,11 @@ def generate_speculative(
             model_kwargs["input_values"],
             model_kwargs,
         )
+
+    model_kwargs = {
+        k: v.to(device) if isinstance(v, torch.Tensor) else v
+        for k, v in model_kwargs.items()
+    }
 
     # 5. Prepare `input_ids` which will be used for auto-regressive generation
     input_ids, model_kwargs = draft_model._prepare_decoder_input_ids_for_generation(
@@ -249,10 +268,9 @@ def generate_speculative(
 
     # Generate until we reach max_length
     while input_ids.shape[1] < max_length:
-        print(input_ids.shape[1], max_length)
         speculated_probs = torch.empty(
             batch_size * draft_model.decoder.num_codebooks, 0
-        )
+        ).to(device)
 
         speculation_length = min(look_ahead, max_length - input_ids.shape[1])
         for i in range(speculation_length):
@@ -347,31 +365,27 @@ def generate_speculative(
     return output_values, acceptance_counter, total_checked
 
 
-def benchmark_spec_audio():
-    draft_model, target_model, processor = load_models()
-    prompts = ["Generate a happy electronic melody"]
-    inputs = processor(text=prompts, padding=True, return_tensors="pt")
-    start_time = time.time()
-
-    start_time = time.time()
-    with torch.no_grad():
-        waveform, acceptance_counter, total_checked = generate_speculative(
-            **inputs,
-            draft_model=draft_model,
-            target_model=target_model,
-            processor=processor,
-        )
-    end_time = time.time()
-    print(f"Generation took {end_time - start_time:.2f} seconds")
-    print("Acceptance rate: ", 100 * acceptance_counter / total_checked)
-
-
 if __name__ == "__main__":
-    # Example usage
-    draft_model, target_model, processor = load_models()
+
+    import argparse
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--quantize", action="store_true", help="Enable quantization of draft model."
+    )
+    args = parser.parse_args()
+
+    draft_model, target_model, processor = load_models(quantize=args.quantize)
 
     prompts = ["Generate a happy electronic melody"]
     inputs = processor(text=prompts, padding=True, return_tensors="pt")
+    inputs = {
+        k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()
+    }
+
+    if args.quantize:
+        print("With draft model quantization")
 
     start_time = time.time()
     with torch.no_grad():
@@ -383,11 +397,33 @@ if __name__ == "__main__":
         )
     print("Acceptance rate: ", 100 * acceptance_counter / total_checked)
     torchaudio.save(
-        "generated_music.wav",
-        waveform[0],
+        "generated_music_spec.wav",
+        waveform[0].to("cpu"),
         draft_model.config.audio_encoder.sampling_rate,
     )
 
     end_time = time.time()
+    speculative = end_time - start_time
 
-    print(f"Generation took {end_time - start_time:.2f} seconds")
+    print(
+        f"Generation with speculative decoding took {end_time - start_time:.2f} seconds"
+    )
+
+    start_time = time.time()
+    with torch.no_grad():
+        audio_waveform = target_model.generate(
+            **inputs, do_sample=True, max_new_tokens=200, use_cache=False
+        )
+    torchaudio.save(
+        "generated_music_non_spec.wav",
+        audio_waveform[0].to("cpu"),
+        draft_model.config.audio_encoder.sampling_rate,
+    )
+
+    end_time = time.time()
+    no_spec = end_time - start_time
+    print(
+        f"Generation took without speculative decoding took {end_time - start_time:.2f} seconds"
+    )
+
+    print(f"Speedup for speculative decoding is {no_spec*1.0/speculative}")
