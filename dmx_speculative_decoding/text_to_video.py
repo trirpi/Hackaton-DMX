@@ -1,5 +1,11 @@
 import torch
-from diffusers import CogVideoXPipeline
+from diffusers import (
+    CogVideoXPipeline,
+    AutoencoderKLCogVideoX,
+    CogVideoXTransformer3DModel,
+)
+from transformers import T5EncoderModel
+from torchao.quantization import quantize_, int8_weight_only
 import time
 import numpy as np
 from torchvision import transforms
@@ -13,16 +19,36 @@ matplotlib.use("Agg")
 
 
 def regular_generation(
-    prompt, height=512, width=512, num_frames=24, steps=200, guidance=6.0, seed=42
+    prompt, height=512, width=512, num_frames=16, steps=30, guidance=6.0, seed=42
 ):
     print("\nRunning regular generation...")
+
+    # Load and quantize models
+    text_encoder = T5EncoderModel.from_pretrained(
+        "THUDM/CogVideoX-5b", subfolder="text_encoder", torch_dtype=torch.bfloat16
+    )
+    quantize_(text_encoder, int8_weight_only())
+
+    transformer = CogVideoXTransformer3DModel.from_pretrained(
+        "THUDM/CogVideoX-5b", subfolder="transformer", torch_dtype=torch.bfloat16
+    )
+    quantize_(transformer, int8_weight_only())
+
+    vae = AutoencoderKLCogVideoX.from_pretrained(
+        "THUDM/CogVideoX-5b", subfolder="vae", torch_dtype=torch.bfloat16
+    )
+    quantize_(vae, int8_weight_only())
+
+    # Create pipeline with quantized components
     pipe = CogVideoXPipeline.from_pretrained(
-        "THUDM/CogVideoX-5b", torch_dtype=torch.float16
+        "THUDM/CogVideoX-5b",
+        text_encoder=text_encoder,
+        transformer=transformer,
+        vae=vae,
+        torch_dtype=torch.bfloat16,
     )
 
     pipe.enable_model_cpu_offload()
-    pipe.enable_sequential_cpu_offload()
-    pipe.vae.enable_slicing()
     pipe.vae.enable_tiling()
 
     start_time = time.time()
@@ -50,25 +76,68 @@ def speculative_generation(
     height=512,
     width=512,
     num_frames=16,
-    main_steps=12,
-    draft_steps=5,
+    main_steps=2,
+    draft_steps=2,
     main_guidance=6.0,
     draft_guidance=3.0,
     refinement_threshold=0.7,
     seed=42,
 ):
     print("\nRunning progressive refinement speculative generation...")
-    main_pipe = CogVideoXPipeline.from_pretrained(
-        "THUDM/CogVideoX-5b", torch_dtype=torch.float16
+
+    # Load and quantize main model components
+    main_text_encoder = T5EncoderModel.from_pretrained(
+        "THUDM/CogVideoX-5b", subfolder="text_encoder", torch_dtype=torch.bfloat16
     )
-    draft_pipe = CogVideoXPipeline.from_pretrained(
-        "THUDM/CogVideoX-2b", torch_dtype=torch.float16
+    quantize_(main_text_encoder, int8_weight_only())
+
+    main_transformer = CogVideoXTransformer3DModel.from_pretrained(
+        "THUDM/CogVideoX-5b", subfolder="transformer", torch_dtype=torch.bfloat16
+    )
+    quantize_(main_transformer, int8_weight_only())
+
+    main_vae = AutoencoderKLCogVideoX.from_pretrained(
+        "THUDM/CogVideoX-5b", subfolder="vae", torch_dtype=torch.bfloat16
+    )
+    quantize_(main_vae, int8_weight_only())
+
+    # Create main pipeline with quantized components
+    main_pipe = CogVideoXPipeline.from_pretrained(
+        "THUDM/CogVideoX-5b",
+        text_encoder=main_text_encoder,
+        transformer=main_transformer,
+        vae=main_vae,
+        torch_dtype=torch.bfloat16,
     )
 
+    # Load and quantize draft model components
+    draft_text_encoder = T5EncoderModel.from_pretrained(
+        "THUDM/CogVideoX-2b", subfolder="text_encoder", torch_dtype=torch.bfloat16
+    )
+    quantize_(draft_text_encoder, int8_weight_only())
+
+    draft_transformer = CogVideoXTransformer3DModel.from_pretrained(
+        "THUDM/CogVideoX-2b", subfolder="transformer", torch_dtype=torch.bfloat16
+    )
+    quantize_(draft_transformer, int8_weight_only())
+
+    draft_vae = AutoencoderKLCogVideoX.from_pretrained(
+        "THUDM/CogVideoX-2b", subfolder="vae", torch_dtype=torch.bfloat16
+    )
+    quantize_(draft_vae, int8_weight_only())
+
+    # Create draft pipeline with quantized components
+    draft_pipe = CogVideoXPipeline.from_pretrained(
+        "THUDM/CogVideoX-2b",
+        text_encoder=draft_text_encoder,
+        transformer=draft_transformer,
+        vae=draft_vae,
+        torch_dtype=torch.bfloat16,
+    )
+
+    # Enable optimizations
     for pipe in [main_pipe, draft_pipe]:
         pipe.enable_model_cpu_offload()
-        pipe.enable_sequential_cpu_offload()
-        pipe.vae.enable_slicing()
         pipe.vae.enable_tiling()
 
     start_time = time.time()
