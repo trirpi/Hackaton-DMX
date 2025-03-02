@@ -14,7 +14,7 @@ from transformers.generation import (
     StoppingCriteriaList,
 )
 
-THRESHOLD = 0.7
+THRESHOLD = 0.9915
 
 
 def jensen_shannon_similarity(p, q, base=2, epsilon=1e-12):
@@ -102,10 +102,12 @@ def generate_speculative(
     draft_model: MusicgenForConditionalGeneration = None,
     target_model: MusicgenForConditionalGeneration = None,
     processor: AutoProcessor = None,
-    max_length: int = 91,
-    look_ahead: int = 3,
+    max_length: int = 200,
+    look_ahead: int = 8,
     **kwargs
 ) -> torch.Tensor:
+    acceptance_counter = 0
+    total_checked = 0
     
     generation_config = draft_model.generation_config
     generation_config.max_length = max_length
@@ -226,7 +228,9 @@ def generate_speculative(
     while input_ids.shape[1] < max_length:
         print(input_ids.shape[1], max_length)
         speculated_probs = torch.empty(batch_size * draft_model.decoder.num_codebooks, 0)
-        for i in range(look_ahead):
+        
+        speculation_length = min(look_ahead, max_length - input_ids.shape[1])
+        for i in range(speculation_length):
             model_kwargs = draft_model._get_initial_cache_position(input_ids, model_kwargs)
             model_inputs = draft_model.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
@@ -238,7 +242,6 @@ def generate_speculative(
                 **model_inputs,
             )
             
-            # synced_gpus: don't waste resources running the code we don't need; kwargs must be updated before skipping
             model_kwargs = draft_model._update_model_kwargs_for_generation(
                 outputs,
                 model_kwargs,
@@ -264,24 +267,25 @@ def generate_speculative(
             input_ids = torch.cat([input_ids, next_token[:, None]], dim=1)
         
         check_outs = target_model.forward(**model_inputs) # verification
-        for i in range(-look_ahead, 0):  
+        total_checked += speculation_length
+        for i in range(-speculation_length, 0):  
             next_token_logits = check_outs.logits[:, i, :].clone().float()
             next_token_scores = nn.functional.log_softmax(
                 next_token_logits, dim=-1
             )
             next_token_scores = logits_processor(input_ids[:, i:], next_token_scores).squeeze(1)
             next_token_probs = nn.functional.softmax(next_token_scores, dim=-1)
-            
-            if jensen_shannon_similarity(next_token_probs, speculated_probs.reshape(4, 2048, 3)[:, :, i]) < THRESHOLD: # TODO: check is imilar in distribution
+            acceptance_counter += 1
+            if jensen_shannon_similarity(next_token_probs, speculated_probs.reshape(4, 2048, speculation_length)[..., i]) < THRESHOLD: # TODO: check is imilar in distribution
                 # if not similar to speculated distribution, reject
                 next_token = torch.multinomial(next_token_probs, num_samples=1).squeeze(1)
-                input_ids = input_ids[:, :i]
                 input_ids = torch.cat([input_ids, next_token[:, None]], dim=1)
                 break
             
        
         
     output_ids = input_ids.reshape((batch_size*4, -1))
+    input_ids = input_ids[:, :max_length] # make sure we do not go over max_length 
     output_ids = draft_model.decoder.apply_delay_pattern_mask(output_ids, decoder_delay_pattern_mask)
     output_ids = output_ids[output_ids != generation_config._pad_token_tensor].reshape(
         batch_size, draft_model.decoder.num_codebooks, -1
@@ -297,8 +301,27 @@ def generate_speculative(
         audio_scales=audio_scales,
     ).audio_values
     
-    return output_values 
+    return output_values, acceptance_counter, total_checked
     
+
+
+def benchmark_spec_audio():
+    draft_model, target_model, processor = load_models()
+    prompts = ["Generate a happy electronic melody"]
+    inputs = processor(text=prompts, padding=True, return_tensors="pt")
+    start_time = time.time()
+    
+    start_time = time.time()
+    with torch.no_grad():
+        waveform, acceptance_counter, total_checked = generate_speculative(
+            **inputs,
+            draft_model=draft_model,
+            target_model=target_model,
+            processor=processor,
+        )
+    end_time = time.time()
+    print(f"Generation took {end_time - start_time:.2f} seconds")
+    print("Acceptance rate: ", 100*acceptance_counter/total_checked)
 
 
 if __name__ == "__main__":
@@ -310,15 +333,17 @@ if __name__ == "__main__":
     
     start_time = time.time()
     with torch.no_grad():
-        waveform = generate_speculative(
+        waveform, acceptance_counter, total_checked = generate_speculative(
             **inputs,
             draft_model=draft_model,
             target_model=target_model,
             processor=processor,
         )
+    print("Acceptance rate: ", 100*acceptance_counter/total_checked)
     torchaudio.save("generated_music.wav", waveform[0], draft_model.config.audio_encoder.sampling_rate)
     
     end_time = time.time()
     
     print(f"Generation took {end_time - start_time:.2f} seconds")
+   
     
