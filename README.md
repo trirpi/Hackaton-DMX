@@ -17,7 +17,9 @@ Accelerating AI inference for multimodal LLMs by exploring generalizable specula
 ## Installation
 
 ## Clone the repository
+```python
 git clone https://github.com/trirpi/Hackaton-DMX.git
+```
 
 ## Navigate to the project directory
 ```python
