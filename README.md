@@ -69,7 +69,7 @@ refinement_threshold = 0.3
 
 ## Requirements  
 
-- CUDA-capable A100 GPU (recommended)  
+- Nvidia A100 GPU (recommended)  
 - See `pyproject.toml` for full dependencies 
 
 
