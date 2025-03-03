@@ -1,26 +1,28 @@
 # DMX-Speculative-Decoding
 
-Speculative Decoding Framework
-A generalized framework for accelerating AI generation across multiple modalities (text-to-video, text-to-audio, text-to-speech) using speculative decoding techniques.
-Overview
+## Speculative Decoding Framework
 
-This project implements a novel approach to accelerate generative AI models by combining lightweight draft models with high-quality refinement models. By using speculative decoding techniques and sophisticated verification methods, we achieve significant speedups (2.5x to 7x) while maintaining comparable output quality.
-Features
+A generalizable approach to accelerating AI inference across multiple modalities (text-to-video, text-to-audio, text-to-speech) by leveraging speculative decoding techniques for faster and more efficient generation.
 
-Multi-modal support: Works with text-to-video, text-to-audio, and text-to-speech generation
+## Overview
 
-Adaptive threshold systems: Dynamically determines which content needs refinement
+Accelerating AI inference for multimodal LLMs by exploring generalizable speculative decoding techniques. By combining lightweight draft models with high-quality refinement models and employing selective verification mechanisms, this approach achieves 2.5x to 6x speedups while maintaining output quality.
 
-Advanced quantization: Uses TorchAO int8 weight-only quantization to reduce memory footprint
-Sophisticated quality metrics: Custom metrics for each modality to ensure high-quality outputs
+## Features
 
-# Installation
+- **Multi-modal support**: Works with text-to-video, text-to-audio, and text-to-speech generation
+- **Advanced quantization**: Uses TorchAO int8 weight-only quantization to reduce memory footprint
+- **Selected verification mechanisms**: Custom metrics for each modality to ensure high-quality outputs
+
+## Installation
 
 ## Clone the repository
 git clone https://github.com/trirpi/Hackaton-DMX.git
 
 ## Navigate to the project directory
+```python
 cd Hackaton-DMX
+```
 
 ## Install the package in development mode
 ```python
@@ -36,7 +38,7 @@ Generate high-quality videos with significantly faster inference:
 ```python dmx_speculative_decoding/text_to_video.py```
 
 ## Customizing Generation
-You can customize the generation by modifying parameters in the script:
+You can customize the generation by modifying parameters:
 
 ### Example parameters
 ```
@@ -53,35 +55,19 @@ refinement_threshold = 0.3
 
 **Draft Generation**: A lightweight model quickly generates initial content
    
-**Quality Analysis**: Sophisticated metrics identify which parts need refinement
+**Quality Analysis**: Effective metrics identify which parts need refinement
 
 **Selective Refinement**: Only critical parts are processed by the high-quality model
 
-**Quantization**: Models are quantized to reduce memory usage and increase speed Performance
+**Quantization**: Models are quantized to reduce memory usage and improve performance
 
 **Text-to-Video**: Up to 6x faster at 512x512 resolution
 **Text-to-Audio**: 3x speedup with comparable quality
 **Text-to-Speech**: 2.5x faster inference while preserving natural speech
 
-## Requirements
-```
-Python 3.8+
-PyTorch 2.0+
-```
-CUDA-capable GPU (recommended)
-See pyproject.toml for full dependencies
+## Requirements  
 
-## Citation
-If you use this framework in your research, please cite our work:
-```
-@software{speculative_decoding_framework,
-  author = {Hackaton-DMX Team},
-  title = {Dmx Speculative Decoding Framework},
-  year = {2025},
-  url = {https://github.com/trirpi/Hackaton-DMX}
-}
-```
+- CUDA-capable A100 GPU (recommended)  
+- See `pyproject.toml` for full dependencies 
 
-### License
-MIT
 

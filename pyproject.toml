@@ -3,9 +3,9 @@ requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dmx_speculative-decoding"
+name = "dmx-speculative-decoding"
 version = "0.1.0"
-description = "dmx speculative decoding framework for accelerating AI generation across modalities"
+description = "DMX speculative decoding framework for accelerating AI generation across modalities"
 readme = "README.md"
 authors = [
     {name = "team_dmx", email = "example@gmail.com"}
@@ -34,6 +34,8 @@ dependencies = [
     "sentencepiece>=0.1.99",
     "scikit-image>=0.19.0",
     "scipy>=1.10.0",
+    "fastdtw>=0.3.4",
+    "outetts>=0.3.3",
 ]
 
 [project.optional-dependencies]
@@ -44,7 +46,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["speculative_decoding"]
+packages = ["dmx_speculative_decoding"]
 
 [tool.black]
 line-length = 88
